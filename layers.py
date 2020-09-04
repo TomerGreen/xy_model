@@ -38,5 +38,5 @@ def SliceRepetitions(final_size, num_reps):
     def compute_output_shape(input_shape):
         return input_shape[0], final_size
 
-    return Lambda(slice_repetitions)
+    return Lambda(slice_repetitions, name='slice_repetitions')
 

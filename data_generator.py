@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 I = np.array([[1, 0], [0, 1]], dtype=np.complex128)
@@ -122,8 +123,8 @@ def get_fermionic_hamiltonian(N, J, h):
         A[i, i + 1] += 0.5 * J[i]
         A[i + 1, i] += 0.5 * J[i]
     # Introducing boundary conditions
-    A[N - 1, 0] += J[N - 1]
-    A[0, N - 1] += J[N - 1]
+    A[N - 1, 0] += 0.5 * J[N - 1]
+    A[0, N - 1] += 0.5 * J[N - 1]
     return A
 
 
@@ -141,24 +142,51 @@ def get_z_correlation(i, j, eigvals, U, P):
     # c = 4 * (P[i, i] * P[j, j] - P[i, j] * P[j, i])
     # # c = 4 * calc_quadruple_term(i, j, eigvals, U)
     # c += 1 - 2 * (P[i, i] + P[j, j])
-
     c = -4 * P[i, j] * P[j, i]
     return c
 
 
-def get_random_index(num_spins):
-    distances = range(1, int(num_spins / 2))
-    weights = [1 / d for d in distances]
+def get_random_distance(num_spins):
+    distances = np.arange(1, int(num_spins / 2))
+    weights = [(1 / d) for d in distances]
     total = sum(weights)
     probs = [weight / total for weight in weights]
     distance = np.random.choice(distances, p=probs)
     sign = np.random.choice([1, -1])
-    index = (distance * sign) % num_spins
-    return index
+    diff = distance * sign
+    return diff
+
+
+def plot_correlation(num_spins, phase_rates, dists, J_val=0.1):
+    dist_corrs = np.zeros(shape=(len(dists), len(phase_rates)))
+    for config_ind, phase_rate in enumerate(phase_rates):
+        J = np.full(num_spins, J_val)
+        h = np.full(num_spins, J_val / phase_rate)
+        A = get_fermionic_hamiltonian(num_spins, J, h)
+        eigvals, U = np.linalg.eigh(A)
+        proj = (eigvals < 0) * np.eye(num_spins)
+        P = np.dot(U, np.dot(proj, np.matrix(U).H))
+        for dist_ind, dist in enumerate(dists):
+            corr = get_z_correlation(0, dist, eigvals, U, P)
+            dist_corrs[dist_ind, config_ind] = corr
+    # for i, phase_rate in enumerate(phase_rates):
+    #     plt.plot(dists, np.log(dist_corrs[:, i] + 1e-30), label="J/h = " + str(phase_rate))
+    # plt.xlabel("dist")
+    # plt.ylabel("log(Spin Z Correlation)")
+    # plt.legend()
+    # plt.show()
+    for i, dist in enumerate(dists):
+        plt.plot(phase_rates, dist_corrs[i, :], label="d = " + str(dist))
+    plt.xlabel("J / h")
+    plt.ylabel("Spin Z Correlation")
+    plt.legend()
+    plt.show()
+
+
 
 
 def get_correlation_data(num_spins, samples, samples_per_config, repetitions=1, disorder=True,
-                         J_mean=0, J_std=0.3, h_mean=0, h_std=0.3, custom_dist=True):
+                         J_mean=0, J_std=0.3, h_mean=0, h_std=0.3, custom_dist=False):
     """
     Generates correlation data for the spin_z correlation neural network. The data contains the coupling coefficients
     vector J, the field strength vector h and a one-hot vector for two spin sites i and j. The ground truth for each
@@ -204,30 +232,39 @@ def get_correlation_data(num_spins, samples, samples_per_config, repetitions=1, 
             while(k == l):
                 k = np.random.randint(num_spins)
                 if custom_dist:
-                    l = get_random_index(num_spins)
+                    l = (k + get_random_distance(num_spins)) % num_spins
                 else:
                     l = np.random.randint(num_spins)
             x[n, k, 0] = 1
             x[n, l, 0] = 1
-            # a.append(k - l)
             y[n] = get_z_correlation(k, l, eigvals, U, P)
             if (n % 100 == 0 and n > 0):
                 print("Created " + str(n) + " samples")
     x = np.tile(x, reps=(1, repetitions, 1))
-    import matplotlib.pyplot as plt
-    # plt.hist(a)
-    # plt.show()
     return x, y
 
 
+class Scaler(object):
+
+    def __init__(self, y=None):
+        self.mean = None
+        self.std = None
+        if y is not None:
+            self.fit(y)
+
+    def fit(self, y):
+        y = np.log(-y + 1e-30)
+        self.mean = y.mean()
+        self.std = y.std()
+
+    def transform(self, y):
+        y = np.log(-y + 1e-30)
+        return (y - self.mean) / self.std
+
+    def inverse_transform(self, y):
+        y = y * self.std + self.mean
+        return np.exp(-(y - 1e-30))
+
 
 if __name__ == '__main__':
-
-    x, y = get_correlation_data(256, 300, 3)
-
-    # simple_jw()
-    # h = np.array([-1, 2, -3, 4, -5, 6, -7, 8])
-    # J = np.ones(8) * 0.5
-    # P = get_gs_proj_matrix(J, h)
-    # print(get_z_correlation(P, 5, 5))
-
+    plot_correlation(num_spins=256, phase_rates=np.arange(0.5, 5.0, 0.01), dists=[4, 10, 20])
