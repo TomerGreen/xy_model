@@ -1,10 +1,23 @@
 import tensorflow as tf
 import numpy as np
-from tensorflow.python.keras.layers import Input, Conv1D, Add, BatchNormalization, Activation, Dense, ZeroPadding1D, \
-    Lambda, AveragePooling1D
+from tensorflow.python.keras.layers import Layer, Lambda
+from tensorflow.python.keras.layers import (
+    Input,
+    Conv1D,
+    Add,
+    BatchNormalization,
+    Activation,
+    Dense,
+    ZeroPadding1D,
+    Lambda,
+    AveragePooling1D,
+)
 from tensorflow.python.keras.models import Model
 from tensorflow.python.keras.regularizers import l2
-from layers import SliceRepetitions
+import os
+from data_generator import CorrelationDataGenerator, RandomValueGenerator, Scaler
+import matplotlib.pyplot as plt
+from tensorflow.keras.optimizers import Adam, SGD
 
 
 ENCODER_KERNEL_SIZE = 1
@@ -12,22 +25,57 @@ DEFAULT_EMBEDDING_LENGTH = 1
 CONV_BLOCK_FILTERS = [32, 32, 32]
 CONV_BLOCK_KERNELS_SIZES = [3, 3, 3]
 CONV_BLOCK_STRIDES = [1, 1, 1]
-REG = 1e-4
+# REG = 1e-5
+REG = 0
 
 
-def apply_conv_block(x, conv_layers, bn_layers, block_num, training=True):
-    assert len(conv_layers) == len(bn_layers)
+def SliceRepetitions(final_size, num_reps):
+    """
+    A layer that takes the middle tile in a sequence of identical tiles. Used to undo the tiling we induce to simulate
+    cyclical boundary conditions.
+    """
+
+    def slice_repetitions(inputs):
+        input_shape = tf.shape(inputs)
+        output = tf.slice(
+            inputs, [0, final_size * int(num_reps / 2)], [input_shape[0], final_size]
+        )
+        # Workaround for compute_output_shape not being called
+        output = tf.reshape(output, compute_output_shape(input_shape))
+        return output
+
+    def compute_output_shape(input_shape):
+        return input_shape[0], final_size
+
+    return Lambda(slice_repetitions, name="slice_repetitions")
+
+
+def apply_conv_block(
+    x, conv_layers, bn_layers, block_num, training=True, use_batchnorm=True
+):
+    if use_batchnorm:
+        assert len(conv_layers) == len(bn_layers)
     # TODO - consider ResNet.
     for i in range(len(conv_layers)):
-        x = ZeroPadding1D(tuple([int((conv_layers[i].kernel_size[0] - 1) / 2)] * 2),
-                          name='zero_padding_' + str(block_num) + '_' + str(i + 1))(x)
+        x = ZeroPadding1D(
+            tuple([int((conv_layers[i].kernel_size[0] - 1) / 2)] * 2),
+            name="zero_padding_" + str(block_num) + "_" + str(i + 1),
+        )(x)
         x = conv_layers[i](x)
-        x = bn_layers[i](x, training=training)
-        x = Activation('relu', name='relu_' + str(block_num) + '_' + str(i + 1))(x)
+        if use_batchnorm:
+            x = bn_layers[i](x, training=training)
+        x = Activation("relu", name="relu_" + str(block_num) + "_" + str(i + 1))(x)
     return x
 
 
-def get_correlation_model(num_spins, num_reps=3, training=True, embedding_length=DEFAULT_EMBEDDING_LENGTH, name='model'):
+def get_correlation_model(
+    num_spins,
+    num_reps=3,
+    training=True,
+    embedding_length=DEFAULT_EMBEDDING_LENGTH,
+    name="model",
+    use_batchnorm=True,
+):
     """
     Implements a convolutional model that finds z_spin correlations from XY model data. The function constructs a
     convolution block and applies it repeatedly on the input, pooling by half after each time, until the input is at
@@ -38,37 +86,49 @@ def get_correlation_model(num_spins, num_reps=3, training=True, embedding_length
     :param training: whether the model is in training or inference mode.
     :return: a model whose input is of shape(batch_size, num_spins, 3) and output is of shape (batch_size,)
     """
-    inputs = Input(shape=(num_spins * num_reps, 3), name='inputs')
+    inputs = Input(shape=(num_spins * num_reps, 3), name="inputs")
     x = inputs
-    x = ZeroPadding1D(padding=tuple([int((ENCODER_KERNEL_SIZE - 1) / 2)] * 2), name='zero_padding_0')(x)
-    x = Conv1D(CONV_BLOCK_FILTERS[0], ENCODER_KERNEL_SIZE, name='conv_0')(x)
+    x = ZeroPadding1D(
+        padding=tuple([int((ENCODER_KERNEL_SIZE - 1) / 2)] * 2), name="zero_padding_0"
+    )(x)
+    x = Conv1D(CONV_BLOCK_FILTERS[0], ENCODER_KERNEL_SIZE, name="conv_0")(x)
     conv_layers, bn_layers = [], []
     for i in range(len(CONV_BLOCK_FILTERS)):
-        conv_layers.append(Conv1D(filters=CONV_BLOCK_FILTERS[i],
-                                  kernel_size=CONV_BLOCK_KERNELS_SIZES[i],
-                                  strides=CONV_BLOCK_STRIDES[i],
-                                  padding='valid',
-                                  use_bias=False,
-                                  kernel_regularizer=l2(REG),
-                                  bias_regularizer=l2(REG),
-                                  name='conv_' + str(i + 1))
-                           )
-        bn_layers.append(BatchNormalization(name='batchnorm_' + str(i + 1)))
+        conv_layers.append(
+            Conv1D(
+                filters=CONV_BLOCK_FILTERS[i],
+                kernel_size=CONV_BLOCK_KERNELS_SIZES[i],
+                strides=CONV_BLOCK_STRIDES[i],
+                padding="valid",
+                use_bias=False,
+                kernel_regularizer=l2(REG),
+                bias_regularizer=l2(REG),
+                name="conv_" + str(i + 1),
+            )
+        )
+        if use_batchnorm:
+            bn_layers.append(BatchNormalization(name="batchnorm_" + str(i + 1)))
     num_conv_blocks = int(np.log2(num_spins / embedding_length))
     for i in range(num_conv_blocks):
-        x = apply_conv_block(x, conv_layers, bn_layers, block_num=i + 1, training=training)
-        x = AveragePooling1D(pool_size=2, padding='valid', name='pooling_' + str(i + 1))(x)
+        x = apply_conv_block(
+            x,
+            conv_layers,
+            bn_layers,
+            block_num=i + 1,
+            training=training,
+            use_batchnorm=use_batchnorm,
+        )
+        x = AveragePooling1D(
+            pool_size=2, padding="valid", name="pooling_" + str(i + 1)
+        )(x)
     # x = Dense(units=1,
     #           kernel_regularizer=l2(REG),
     #           bias_regularizer=l2(REG),
     #           name='repeated_correlation')(x)
     # Switched to conv instead of dense because dense tends to output a single value for all samples.
-    x = Conv1D(filters=1,
-               kernel_size=1,
-               kernel_regularizer=l2(REG),
-               bias_regularizer=l2(REG),
-               name='repeated_correlation')(x)
-    x = Lambda(tf.squeeze, arguments={'axis': 2}, name='squeeze_1')(x)
+    # Note that I removed regularization for the last layer.
+    x = Conv1D(filters=1, kernel_size=1, name="repeated_correlation")(x)
+    x = Lambda(tf.squeeze, arguments={"axis": 2}, name="squeeze_1")(x)
     x = SliceRepetitions(final_size=DEFAULT_EMBEDDING_LENGTH, num_reps=num_reps)(x)
     # x = Lambda(tf.squeeze, arguments={'axis': 1}, name='squeeze_2')(x)
     # TODO - Consider intermediate dense layer.
@@ -79,22 +139,131 @@ def get_correlation_model(num_spins, num_reps=3, training=True, embedding_length
     return Model(inputs=inputs, outputs=x, name=name)
 
 
-def extend_model(orig_model, new_num_spins=None, num_reps=3, training=True, embedding_length=DEFAULT_EMBEDDING_LENGTH):
+def extend_model(
+    orig_model,
+    new_num_spins=None,
+    num_reps=3,
+    training=True,
+    embedding_length=DEFAULT_EMBEDDING_LENGTH,
+):
     orig_num_spins = int(orig_model.input.get_shape().as_list()[1] / num_reps)
     if new_num_spins is None:
         new_num_spins = orig_num_spins * 2
-    new_model = get_correlation_model(num_spins=new_num_spins,
-                                      num_reps=num_reps,
-                                      training=training,
-                                      embedding_length=embedding_length)
-    orig_model.get_weights()
+    extended_model = get_correlation_model(
+        num_spins=new_num_spins,
+        num_reps=num_reps,
+        training=training,
+        embedding_length=embedding_length,
+    )
+    extend_model._name = orig_model.name + str("_extended")
+    orig_model.save_weights("temp.h5")
+    extended_model.load_weights("temp.h5", by_name=True)
+    os.remove("temp.h5")
+
+    # Option 1 - rescaling the correlation
+    # extended_model.trainable = False
+    # x = extended_model(extended_model.inputs)
+    # x = Dense(units=1, name="scale")(x)
+    # new_model = Model(inputs=extended_model.inputs, outputs=x)
+    # return new_model
+
+    # Option 2 - letting the embedding layer train
+    for layer in extended_model.layers:
+        if layer.name == "repeated_correlation":
+            break
+        layer.trainable = False
+    return extended_model
 
 
+def mse(y, y_hat):
+    assert len(y) == len(y_hat)
+    y_hat = np.reshape(y_hat, newshape=y.shape)
+    return np.sum((y - y_hat) ** 2) / len(y)
 
 
+if __name__ == "__main__":
+    model = get_correlation_model(num_spins=1024, num_reps=3, name="smoothed_05_diff")
+    model.load_weights("trained_models/smoothed_05_diff_adam_0510-1714/weights.h5")
+    J_val_gen = RandomValueGenerator("uniform", 1.5, 2.5)
+    h_val_gen = RandomValueGenerator("uniform", 0.5, 1.5)
+    data_gen = CorrelationDataGenerator(
+        num_spins=256,
+        J_val_gen=J_val_gen,
+        h_val_gen=h_val_gen,
+        disorder=False,
+        gaussian_smoothing_sigma=5,
+        toy_model=False,
+    )
 
+    # extended_model = extend_model(model, new_num_spins=1024)
+    # extended_model.summary()
 
-if __name__ == '__main__':
-    model = get_correlation_model(num_spins=256, num_reps=3)
-    model.summary()
-    extended_model = extend_model(model)
+    # Just for scaling
+    # _, y_for_caling = get_correlation_data(
+    #     256,
+    #     10000,
+    #     50,
+    #     3,
+    #     disorder=False,
+    #     J_low=1.5,
+    #     J_high=2.5,
+    #     h_low=0.5,
+    #     h_high=1.5,
+    #     custom_dist=False,
+    #     gaussian_smoothing_sigma=5,
+    #     toy_model=False,
+    # )
+    # scaler = Scaler(y_for_caling, log=True, normalize=True)
+    # print("scaler:")
+    # print(scaler.mean)
+    # print(scaler.std)
+    # x, y = get_correlation_data(
+    #     1024,
+    #     10000,
+    #     50,
+    #     3,
+    #     disorder=False,
+    #     J_low=1.5,
+    #     J_high=2.5,
+    #     h_low=0.5,
+    #     h_high=1.5,
+    #     custom_dist=False,
+    #     gaussian_smoothing_sigma=5,
+    #     toy_model=False,
+    # )
+    # print("data:")
+    # print(y.mean())
+    # print(y.std())
+    # y = scaler.transform(y)
+    # extended_model.compile(optimizer=Adam(), loss="mse", metrics=["mse"])
+    # extended_model.fit(
+    #     x, y, epochs=100, validation_split=0.2,
+    # )
+    # test_x, test_y = get_correlation_data(
+    #     512,
+    #     10000,
+    #     50,
+    #     3,
+    #     disorder=False,
+    #     J_low=1.5,
+    #     J_high=2.5,
+    #     h_low=0.5,
+    #     h_high=1.5,
+    #     custom_dist=False,
+    #     gaussian_smoothing_sigma=5,
+    #     toy_model=False,
+    # )
+    # pred = extended_model.predict(test_x)
+    # # pred = scaler.inverse_transform(pred)
+    # plt.hist(pred, bins=100)
+    # plt.show()
+    # print(pred.mean())
+    # print(pred.max())
+    # print(pred.min())
+    # test_y = scaler.transform(test_y)
+    # plt.hist(test_y, bins=100)
+    # plt.show()
+    # print(test_y.mean())
+    # print(test_y.max())
+    # print(test_y.min())
+    # print(mse(test_y, pred))

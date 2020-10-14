@@ -1,11 +1,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from numpy.core._multiarray_umath import ndarray
+import random
 
 
 I = np.array([[1, 0], [0, 1]], dtype=np.complex128)
 SIG_X = np.array([[0, 1], [1, 0]], dtype=np.complex128)
 SIG_Y = np.array([[0, -1j], [1j, 0]])
 SIG_Z = np.array([[1, 0], [0, -1]], dtype=np.complex128)
+
 
 def op_tensor(op, i):
     """
@@ -21,6 +24,7 @@ def op_tensor(op, i):
             curr = op
         ten = np.kron(ten, curr)
     return ten
+
 
 def get_hamiltonian(J_x, J_y, h):
     """
@@ -40,6 +44,7 @@ def get_hamiltonian(J_x, J_y, h):
         H += h * op_tensor(SIG_Z, i)
     return H
 
+
 def get_ground_state(H):
     """
     Gets the ground state of a Hamiltonian
@@ -51,6 +56,7 @@ def get_ground_state(H):
     gs = eig_states[:, np.argmin(eig_vals)]
     return gs
 
+
 def ex_value(ten, state):
     """
     Gets the expected value of a tensor operator and a state.
@@ -59,6 +65,7 @@ def ex_value(ten, state):
     :return: the expectation value as a scalar.
     """
     return np.real(np.dot(state.T, np.dot(ten, state)))
+
 
 def get_correlation(op, state):
     """
@@ -72,7 +79,9 @@ def get_correlation(op, state):
     for i in range(N):
         for j in range(N):
             op_i, op_j = op_tensor(op, i), op_tensor(op, j)
-            C[i, j] = ex_value(np.dot(op_i, op_j), state) - ex_value(op_i, state) * ex_value(op_j, state)
+            C[i, j] = ex_value(np.dot(op_i, op_j), state) - ex_value(
+                op_i, state
+            ) * ex_value(op_j, state)
     return C
 
 
@@ -137,7 +146,7 @@ def calc_quadruple_term(i, j, eigvals, U):
     return sum
 
 
-def get_z_correlation(i, j, eigvals, U, P):
+def get_z_correlation(i, j, P):
     # # These two lines seem equivalent.
     # c = 4 * (P[i, i] * P[j, j] - P[i, j] * P[j, i])
     # # c = 4 * calc_quadruple_term(i, j, eigvals, U)
@@ -159,112 +168,382 @@ def get_random_distance(num_spins):
 
 def plot_correlation(num_spins, phase_rates, dists, J_val=0.1):
     dist_corrs = np.zeros(shape=(len(dists), len(phase_rates)))
+    spectra = np.zeros(shape=(num_spins, len(phase_rates)))
     for config_ind, phase_rate in enumerate(phase_rates):
         J = np.full(num_spins, J_val)
         h = np.full(num_spins, J_val / phase_rate)
         A = get_fermionic_hamiltonian(num_spins, J, h)
         eigvals, U = np.linalg.eigh(A)
+        spectra[:, config_ind] = eigvals
         proj = (eigvals < 0) * np.eye(num_spins)
-        P = np.dot(U, np.dot(proj, np.matrix(U).H))
+        P = np.dot(U, np.dot(proj, np.array(U).conj().T))
         for dist_ind, dist in enumerate(dists):
-            corr = get_z_correlation(0, dist, eigvals, U, P)
+            corr = get_z_correlation(0, dist, P)
             dist_corrs[dist_ind, config_ind] = corr
-    # for i, phase_rate in enumerate(phase_rates):
-    #     plt.plot(dists, np.log(dist_corrs[:, i] + 1e-30), label="J/h = " + str(phase_rate))
-    # plt.xlabel("dist")
-    # plt.ylabel("log(Spin Z Correlation)")
-    # plt.legend()
-    # plt.show()
-    for i, dist in enumerate(dists):
-        plt.plot(phase_rates, dist_corrs[i, :], label="d = " + str(dist))
-    plt.xlabel("J / h")
+    print(dist_corrs)
+    for i, phase_rate in enumerate(phase_rates):
+        # plt.plot(dists, np.log(-dist_corrs[:, i] + 1e-30), label="J/h = " + str(phase_rate))
+        plt.plot(dists, dist_corrs[:, i], label="J/h = " + str(phase_rate))
+    plt.xlabel("dist")
     plt.ylabel("Spin Z Correlation")
     plt.legend()
     plt.show()
 
+    # for i, phase_rate in enumerate(phase_rates):
+    #     plt.scatter([phase_rate] * len(spectra[:, i]), spectra[:, i], s=0.1)
+    # plt.xlabel("J / h")
+    # plt.ylabel("Energy Levels")
+    # plt.show()
+
+    # for i, dist in enumerate(dists):
+    #     plt.plot(phase_rates, dist_corrs[i, :], label="d = " + str(dist))
+    # plt.xlabel("J / h")
+    # plt.ylabel("Spin Z Correlation")
+    # plt.legend()
+    # plt.show()
 
 
+def get_gaussian_kernel(length=11, sigma=1):
+    r = range(-int(length / 2), int(length / 2) + 1)
+    return [
+        1 / (sigma * np.sqrt(2 * np.pi)) * np.exp(-float(x) ** 2 / (2 * sigma ** 2))
+        for x in r
+    ]
 
-def get_correlation_data(num_spins, samples, samples_per_config, repetitions=1, disorder=True,
-                         J_mean=0, J_std=0.3, h_mean=0, h_std=0.3, custom_dist=False):
-    """
-    Generates correlation data for the spin_z correlation neural network. The data contains the coupling coefficients
-    vector J, the field strength vector h and a one-hot vector for two spin sites i and j. The ground truth for each
-    sample is the spin-z correlation between these sites.
-    :param num_spins: The number of spins in the chain.
-    :param samples: The number of samples to generate.
-    :param samples_per_config: The number of samples from each Hamiltonian configuration.
-    :param repetitions: The number of times the J, h and one-hot vectors will be repeated. Used to simulate cyclic
-    boundary condition for the convolutional network.
-    :param disorder: Whether to include disorder in the J and h vectors. If there is disorder, the coupling
-    coefficient J[i] and field strength h[i] at each site will be drawn individually for each configuration and each,
-    according to the means and std values specified. If there is no disorder, the J and h vectors for each configuration
-    will be uniform, but their values will be drawn from the means and stds specified.
-    :param J_mean: Mean value for drawing coupling coefficients.
-    :param J_std: Standard deviation for drawing coupling coefficients.
-    :param h_mean: Mean value for drawing field strengths.
-    :param h_std: Standard deviation for drawing field strengths.
-    :return:
-        x - An array of shape (samples, num_spins, 3): the first channel is a one-hot vector for the sites where the
-        correlation is measured, and the second and third channels are coupling and field coefficients vectors J and h.
-        y - An array of shape (samples,) that specifies the correlation between the sites marked by the one-hot vector.
-    """
-    x = np.zeros((samples, num_spins, 3))
-    y = np.zeros(samples)
-    # a = []
-    for i in range(int(samples / samples_per_config)):
-        if disorder:
-            J = np.random.normal(J_mean, J_std, num_spins)
-            h = np.random.normal(h_mean, h_std, num_spins)
+
+def get_smooth_correlations(P, kernel):
+    num_spins = P.shape[0]
+    one_hot_mat = np.zeros(shape=(num_spins - 1, num_spins))
+    corrs = np.zeros(shape=num_spins)
+    for d in range(0, num_spins - 1):
+        one_hot_mat[d, 0] = 1
+        one_hot_mat[d, d + 1] = 1
+        corrs[d] = get_z_correlation(0, d, P)
+    # plt.plot(range(50, 206), corrs[50:206])
+    # plt.show()
+    corrs = np.tile(corrs, reps=3)
+    smoothed_corrs = np.convolve(corrs, kernel, mode="same")
+    smoothed_corrs = smoothed_corrs[num_spins - 1 : 2 * (num_spins - 1)]
+    # plt.plot(range(50, 206), smoothed_corrs[50:206])
+    # plt.show()
+    return one_hot_mat, smoothed_corrs
+
+
+class RandomValueGenerator:
+    """Generates a random number when called, based on a given distribution type and parameters."""
+
+    def __init__(self, dist_type: str, a: float, b: float):
+        """
+        Defines the distribution
+        :param dist_type: One of the distribution types used in __call__.
+        :param a: The first parameter for the distribution type. For example, if dist_type="uniform", a is the
+        lowest value and b in the highest, and if dist_type="normal", a is the mean and b is the std.
+        :param b: The second parameter for the distribution type.
+        """
+        self.dist_type = dist_type
+        self.a = a
+        self.b = b
+
+    def __call__(self, shape=None, *args, **kwargs):
+        """
+        :param shape: The shape of the requested array filled with random values. If not provided, will return a scalar.
+        :return: An array or value from the requested distribution.
+        """
+        if self.dist_type == "uniform":
+            val = (
+                np.random.uniform(low=self.a, high=self.b)
+                if shape is None
+                else np.random.uniform(low=self.a, high=self.b, size=shape)
+            )
+        elif self.dist_type == "normal":
+            val = (
+                np.random.normal(loc=self.a, scale=self.b)
+                if shape is None
+                else np.random.normal(loc=self.a, scale=self.b, size=shape)
+            )
         else:
-            J = np.full(num_spins, np.random.normal(J_mean, J_std))
-            h = np.full(num_spins, np.random.normal(h_mean, h_std))
-        A = get_fermionic_hamiltonian(num_spins, J, h)
-        eigvals, U = np.linalg.eigh(A)
-        proj = (eigvals < 0) * np.eye(num_spins)
-        P = np.dot(U, np.dot(proj, np.matrix(U).H))
-        for j in range(samples_per_config):
-            n = i * samples_per_config + j
-            x[n, :, 1] = J
-            x[n, :, 2] = h
-            # Do we need to make sure the indices are different?
-            k = l = 0
-            while(k == l):
-                k = np.random.randint(num_spins)
-                if custom_dist:
-                    l = (k + get_random_distance(num_spins)) % num_spins
+            raise ValueError(
+                "RandomValueGenerator dist_type must be either 'uniform' or 'normal'."
+            )
+        return val
+
+
+class CorrelationDataGenerator:
+    """
+    Generates image-like data for the XY model solver.
+    """
+
+    def __init__(
+        self,
+        repetitions=3,
+        J_val_gen=RandomValueGenerator("normal", 0.0, 1.0),
+        h_val_gen=RandomValueGenerator("normal", 0.0, 1.0),
+        disorder=True,
+        custom_dist=False,
+        gaussian_smoothing_sigma=0,
+        toy_model=False,
+    ):
+        """
+        Defines the data being generated.
+        :param num_spins: The number of spins in the simulated spin chain.
+        :param repetitions: The number of times the J, h and one-hot vectors will be repeated.
+        Used to simulate cyclic boundary condition for the convolutional network.
+        :param J_val_gen: The random value generator used to generate values for coupling.
+        :param h_val_gen: The random value generator used to generate values for field.
+        :param disorder: Whether to include disorder in the J and h vectors. If there is
+        disorder, the coupling coefficient J[i] and field strength h[i] at each site will be
+        drawn individually for each site in the configuration. Otherwise, the J and h vectors for
+        each configuration will be a full vector with a value from rand_val_gen.
+        :param custom_dist: Whether we are using a custom distribution for distances between
+        examined sites.
+        :param gaussian_smoothing_sigma: An odd int. The sigma value for gaussian smoothing. A
+        kernel with this sigma
+        will be convolved with the by-distance data if gaussian_smoothing_sigma > 0.
+        :param toy_model: Whether to generate data from the toy model (|J/h|)/r.
+        """
+        self.repetitions = repetitions
+        self.J_val_gen = J_val_gen
+        self.h_val_gen = h_val_gen
+        self.disorder = disorder
+        self.custom_dist = custom_dist
+        self.gaussian_smoothing_sigma = gaussian_smoothing_sigma
+        self.toy_model = toy_model
+
+    def get_data(
+        self, num_spins, samples, samples_per_config,
+    ):
+        """
+        Generates correlation data for the spin_z correlation neural network. The data contains
+        the coupling coefficients vector J, the field strength vector h and a one-hot vector for
+        two spin sites i and j. The ground truth for each sample is the spin-z correlation
+        between these sites.
+        :param samples: The number of samples to generate.
+        :param samples_per_config: The number of samples from each Hamiltonian configuration.
+        :return:
+            x - An array of shape (samples, num_spins, 3): the first channel is a one-hot vector
+            for the sites where the correlation is measured, and the second and third channels
+            are coupling and field coefficients vectors J and h.
+            y - An array of shape (samples,) that specifies the correlation between the sites
+            marked by the one-hot vector.
+        """
+        x = np.zeros((samples, num_spins, 3))
+        y = np.zeros(samples)
+        for i in range(int(samples / samples_per_config)):
+            if self.disorder:
+                J = self.J_val_gen(shape=num_spins)
+                h = self.h_val_gen(shape=num_spins)
+            else:
+                J = np.full(num_spins, self.J_val_gen())
+                h = np.full(num_spins, self.h_val_gen())
+            A = get_fermionic_hamiltonian(num_spins, J, h)
+            eigvals, U = np.linalg.eigh(A)
+            proj = (eigvals < 0) * np.eye(num_spins)
+            P = np.dot(U, np.dot(proj, np.matrix(U).H))
+            if self.gaussian_smoothing_sigma > 0:
+                gaussian_kernel = get_gaussian_kernel(
+                    length=101, sigma=self.gaussian_smoothing_sigma
+                )
+                one_hot_mat, corrs = get_smooth_correlations(P, kernel=gaussian_kernel)
+            for j in range(samples_per_config):
+                n = i * samples_per_config + j
+                x[n, :, 1] = J
+                x[n, :, 2] = h
+                if self.gaussian_smoothing_sigma > 0:
+                    rand_int = np.random.randint(low=0, high=num_spins - 1)
+                    x[n, :, 0] = one_hot_mat[rand_int, :]
+                    y[n] = corrs[rand_int]
                 else:
-                    l = np.random.randint(num_spins)
-            x[n, k, 0] = 1
-            x[n, l, 0] = 1
-            y[n] = get_z_correlation(k, l, eigvals, U, P)
-            if (n % 100 == 0 and n > 0):
-                print("Created " + str(n) + " samples")
-    x = np.tile(x, reps=(1, repetitions, 1))
-    return x, y
+                    # Do we need to make sure the indices are different?
+                    k, l = 0, 0
+                    while k == l:
+                        k = np.random.randint(num_spins)
+                        if self.custom_dist:
+                            l = (k + get_random_distance(num_spins)) % num_spins
+                        else:
+                            l = np.random.randint(num_spins)
+                    x[n, k, 0] = 1
+                    x[n, l, 0] = 1
+                    if self.toy_model:
+                        distance = min((l - k) % num_spins, (k - l) % num_spins)
+                        y[n] = -np.abs(J[0] / h[0]) / distance
+                    else:
+                        y[n] = get_z_correlation(k, l, P)
+                if n % 1000 == 0 and n > 0:
+                    print("Created " + str(n) + "/" + str(samples) + " samples")
+        x = np.tile(x, reps=(1, self.repetitions, 1))
+        temp = list(zip(x, y))
+        random.shuffle(temp)
+        x, y = zip(*temp)
+        return np.array(x), np.array(y)
+
+
+# def get_correlation_data(
+#     num_spins,
+#     samples,
+#     samples_per_config,
+#     repetitions=1,
+#     disorder=True,
+#     J_mean=None,
+#     J_sigma=None,
+#     h_mean=None,
+#     h_sigma=None,
+#     J_low=None,
+#     J_high=None,
+#     h_low=None,
+#     h_high=None,
+#     custom_dist=False,
+#     gaussian_smoothing_sigma=0,
+#     toy_model=False,
+# ):
+#     """
+#     Generates correlation data for the spin_z correlation neural network. The data contains the coupling coefficients
+#     vector J, the field strength vector h and a one-hot vector for two spin sites i and j. The ground truth for each
+#     sample is the spin-z correlation between these sites.
+#     :param num_spins: The number of spins in the chain.
+#     :param samples: The number of samples to generate.
+#     :param samples_per_config: The number of samples from each Hamiltonian configuration.
+#     :param repetitions: The number of times the J, h and one-hot vectors will be repeated. Used to simulate cyclic
+#     boundary condition for the convolutional network.
+#     :param disorder: Whether to include disorder in the J and h vectors. If there is disorder, the coupling
+#     coefficient J[i] and field strength h[i] at each site will be drawn individually for each configuration and each,
+#     according to the means and std values specified. If there is no disorder, the J and h vectors for each configuration
+#     will be uniform, but their values will be drawn from the means and stds specified.
+#     :param J_mean: Mean value for drawing coupling coefficients.
+#     :param J_sigma: Standard deviation for drawing coupling coefficients.
+#     :param h_mean: Mean value for drawing field strengths.
+#     :param h_sigma: Standard deviation for drawing field strengths.
+#     :return:
+#         x - An array of shape (samples, num_spins, 3): the first channel is a one-hot vector for the sites where the
+#         correlation is measured, and the second and third channels are coupling and field coefficients vectors J and h.
+#         y - An array of shape (samples,) that specifies the correlation between the sites marked by the one-hot vector.
+#     """
+#     x = np.zeros((samples, num_spins, 3))
+#     y = np.zeros(samples)
+#     for i in range(int(samples / samples_per_config)):
+#         if all([x is not None for x in [J_mean, J_sigma, h_mean, h_sigma]]):
+#             if disorder:
+#                 J = np.random.normal(J_mean, J_sigma, num_spins)
+#                 h = np.random.normal(h_mean, h_sigma, num_spins)
+#             else:
+#                 J = np.full(num_spins, np.random.normal(J_mean, J_sigma))
+#                 h = np.full(num_spins, np.random.normal(h_mean, h_sigma))
+#         elif all([x is not None for x in [J_low, J_high, h_low, h_high]]):
+#             if disorder:
+#                 J = np.random.uniform(J_low, J_high, num_spins)
+#                 h = np.random.uniform(h_low, h_high, num_spins)
+#             else:
+#                 J = np.full(num_spins, np.random.uniform(J_low, J_high))
+#                 h = np.full(num_spins, np.random.uniform(h_low, h_high))
+#         else:
+#             raise ValueError(
+#                 "Either (h_low, h_high, J_low, J_high) must be provided for uniform distribution,"
+#                 + " or (h_mean, h_std, J_mean, J_std) for normal distribution"
+#             )
+#         A = get_fermionic_hamiltonian(num_spins, J, h)
+#         eigvals, U = np.linalg.eigh(A)
+#         proj = (eigvals < 0) * np.eye(num_spins)
+#         P = np.dot(U, np.dot(proj, np.matrix(U).H))
+#         if gaussian_smoothing_sigma > 0:
+#             gaussian_kernel = get_gaussian_kernel(
+#                 length=101, sigma=gaussian_smoothing_sigma
+#             )
+#             one_hot_mat, corrs = get_smooth_correlations(P, kernel=gaussian_kernel)
+#         for j in range(samples_per_config):
+#             n = i * samples_per_config + j
+#             x[n, :, 1] = J
+#             x[n, :, 2] = h
+#             if gaussian_smoothing_sigma > 0:
+#                 rand_int = np.random.randint(low=0, high=num_spins - 1)
+#                 x[n, :, 0] = one_hot_mat[rand_int, :]
+#                 y[n] = corrs[rand_int]
+#             else:
+#                 # Do we need to make sure the indices are different?
+#                 k = l = 0
+#                 while k == l:
+#                     k = np.random.randint(num_spins)
+#                     if custom_dist:
+#                         l = (k + get_random_distance(num_spins)) % num_spins
+#                     else:
+#                         l = np.random.randint(num_spins)
+#                 x[n, k, 0] = 1
+#                 x[n, l, 0] = 1
+#                 if toy_model:
+#                     distance = min((l - k) % num_spins, (k - l) % num_spins)
+#                     y[n] = -np.abs(J[0] / h[0]) / distance
+#                 else:
+#                     y[n] = get_z_correlation(k, l, P)
+#             if n % 1000 == 0 and n > 0:
+#                 print("Created " + str(n) + "/" + str(samples) + " samples")
+#     x = np.tile(x, reps=(1, repetitions, 1))
+#     temp = list(zip(x, y))
+#     random.shuffle(temp)
+#     x, y = zip(*temp)
+#     return np.array(x), np.array(y)
 
 
 class Scaler(object):
-
-    def __init__(self, y=None):
+    def __init__(self, y=None, log=True, normalize=True):
+        self.log = log
+        self.normalize = normalize
         self.mean = None
         self.std = None
         if y is not None:
             self.fit(y)
 
     def fit(self, y):
-        y = np.log(-y + 1e-30)
+        if self.log:
+            y = np.log(-y + 1e-30)
         self.mean = y.mean()
         self.std = y.std()
 
     def transform(self, y):
-        y = np.log(-y + 1e-30)
-        return (y - self.mean) / self.std
+        if self.log:
+            y = np.log(-y + 1e-30)
+        if self.normalize:
+            y = (y - self.mean) / self.std
+        return y
 
     def inverse_transform(self, y):
-        y = y * self.std + self.mean
-        return np.exp(-(y - 1e-30))
+        if self.normalize:
+            y = y * self.std + self.mean
+        if self.log:
+            y = np.exp(y)
+            y = -(y - 1e-30)
+        return y
 
 
-if __name__ == '__main__':
-    plot_correlation(num_spins=256, phase_rates=np.arange(0.5, 5.0, 0.01), dists=[4, 10, 20])
+def get_distances_from_x(x, num_reps=3):
+    def get_distance(x_vec):
+        num_spins = len(x_vec)
+        nonzero_inds = np.argwhere(x_vec == 1.0)
+        k, l = nonzero_inds[0, 0], nonzero_inds[1, 0]
+        distance = min((l - k) % num_spins, (k - l) % num_spins)
+        return distance
+
+    num_spins = int(x.shape[1] / num_reps)
+    ind_start = num_spins * int(num_reps / 2)
+    spin_locs = x[:, ind_start : ind_start + num_spins, 0]
+    distances = np.apply_along_axis(get_distance, axis=1, arr=spin_locs)
+    return distances
+
+
+def analyze_corr_by_distance(distances, y):
+    plt.scatter(distances, np.log(-y))
+    # plt.scatter(distances, np.log(-y))
+    plt.show()
+
+
+if __name__ == "__main__":
+    J_rand_gen = RandomValueGenerator("normal", 2.0, 0.0)
+    h_rand_gen = RandomValueGenerator("normal", 1.0, 0.0)
+
+    data_gen = CorrelationDataGenerator(
+        num_spins=256,
+        J_val_gen=J_rand_gen,
+        h_val_gen=h_rand_gen,
+        disorder=False,
+        gaussian_smoothing_sigma=5,
+    )
+    x, y = data_gen.get_data(1000, 50)
+    distances = get_distances_from_x(x)
+    analyze_corr_by_distance(distances, y)
