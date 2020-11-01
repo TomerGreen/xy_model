@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from numpy.core._multiarray_umath import ndarray
 import random
 
 
@@ -219,12 +218,21 @@ def get_smooth_correlations(P, kernel):
         one_hot_mat[d, 0] = 1
         one_hot_mat[d, d + 1] = 1
         corrs[d] = get_z_correlation(0, d, P)
-    # plt.plot(range(50, 206), corrs[50:206])
+    # plt.plot(range(1, 128), -corrs[1:128] + 1e-30)
+    # plt.suptitle("Spin Correlation by Distance")
+    # plt.ylabel("-corr(i, j)")
+    # plt.xlabel("r(i, j)")
+    # plt.xscale("log")
+    # plt.yscale("log")
     # plt.show()
     corrs = np.tile(corrs, reps=3)
     smoothed_corrs = np.convolve(corrs, kernel, mode="same")
     smoothed_corrs = smoothed_corrs[num_spins - 1 : 2 * (num_spins - 1)]
-    # plt.plot(range(50, 206), smoothed_corrs[50:206])
+    # plt.plot(range(1, 128), -smoothed_corrs[1:128])
+    # plt.suptitle("Smoothed Spin Correlation by Distance")
+    # plt.ylabel("-corr(i, j) * g(r)")
+    # plt.xlabel("r(i, j)")
+    # plt.yscale("log")
     # plt.show()
     return one_hot_mat, smoothed_corrs
 
@@ -310,7 +318,10 @@ class CorrelationDataGenerator:
         self.toy_model = toy_model
 
     def get_data(
-        self, num_spins, samples, samples_per_config,
+        self,
+        num_spins,
+        samples,
+        samples_per_config,
     ):
         """
         Generates correlation data for the spin_z correlation neural network. The data contains
@@ -534,16 +545,15 @@ def analyze_corr_by_distance(distances, y):
 
 
 if __name__ == "__main__":
-    J_rand_gen = RandomValueGenerator("normal", 2.0, 0.0)
+    J_rand_gen = RandomValueGenerator("normal", 1.0, 0.0)
     h_rand_gen = RandomValueGenerator("normal", 1.0, 0.0)
 
     data_gen = CorrelationDataGenerator(
-        num_spins=256,
         J_val_gen=J_rand_gen,
         h_val_gen=h_rand_gen,
         disorder=False,
-        gaussian_smoothing_sigma=5,
+        gaussian_smoothing_sigma=3,
     )
-    x, y = data_gen.get_data(1000, 50)
-    distances = get_distances_from_x(x)
-    analyze_corr_by_distance(distances, y)
+    x, y = data_gen.get_data(256, 256, 255)
+    # distances = get_distances_from_x(x)
+    # analyze_corr_by_distance(distances, y)

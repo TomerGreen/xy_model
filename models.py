@@ -1,7 +1,6 @@
 import tensorflow as tf
 import numpy as np
-from tensorflow.python.keras.layers import Layer, Lambda
-from tensorflow.python.keras.layers import (
+from tensorflow.keras.layers import (
     Input,
     Conv1D,
     Add,
@@ -11,9 +10,10 @@ from tensorflow.python.keras.layers import (
     ZeroPadding1D,
     Lambda,
     AveragePooling1D,
+    LayerNormalization,
 )
-from tensorflow.python.keras.models import Model
-from tensorflow.python.keras.regularizers import l2
+from tensorflow.keras.models import Model
+from tensorflow.keras.regularizers import l2
 import os
 from data_generator import CorrelationDataGenerator, RandomValueGenerator, Scaler
 import matplotlib.pyplot as plt
@@ -68,13 +68,44 @@ def apply_conv_block(
     return x
 
 
+def get_recurrent_module(normalize=True):
+    """
+    Returns the recurrent module as a list of layers.
+    """
+    module = []
+    for i in range(len(CONV_BLOCK_FILTERS)):
+        module.append(
+            ZeroPadding1D(
+                tuple([int((CONV_BLOCK_KERNELS_SIZES[i] - 1) / 2)] * 2),
+                name="zero_padding_" + str(i + 1),
+            )
+        )
+        module.append(
+            Conv1D(
+                filters=CONV_BLOCK_FILTERS[i],
+                kernel_size=CONV_BLOCK_KERNELS_SIZES[i],
+                strides=CONV_BLOCK_STRIDES[i],
+                padding="valid",
+                use_bias=False,
+                kernel_regularizer=l2(REG),
+                bias_regularizer=l2(REG),
+                name="conv_" + str(i + 1),
+            )
+        )
+        if normalize:
+            module.append(LayerNormalization(name="layernorm_" + str(i + 1)))
+            # module.append(BatchNormalization(name="batchnorm_" + str(i + 1)))
+        module.append(Activation("relu", name="relu_" + str(i + 1)))
+    module.append(AveragePooling1D(pool_size=2, padding="valid", name="avg_pooling"))
+    return module
+
+
 def get_correlation_model(
     num_spins,
     num_reps=3,
-    training=True,
     embedding_length=DEFAULT_EMBEDDING_LENGTH,
     name="model",
-    use_batchnorm=True,
+    normalize=True,
 ):
     """
     Implements a convolutional model that finds z_spin correlations from XY model data. The function constructs a
@@ -83,9 +114,40 @@ def get_correlation_model(
     :param num_spins: the number of spins in the spin chain
     :param num_reps: an odd integer. the number of times the input repeats itself, to imitate periodic boundary
     conditions.
-    :param training: whether the model is in training or inference mode.
+    :param embedding_length: Length of input before the decoder.
+    :param name: The name of the returned model.
+    :param normalize: Whether to use normalization in the conv blocks.
     :return: a model whose input is of shape(batch_size, num_spins, 3) and output is of shape (batch_size,)
     """
+    inputs = Input(shape=(num_spins * num_reps, 3), name="inputs")
+    x = inputs
+    x = ZeroPadding1D(
+        padding=tuple([int((ENCODER_KERNEL_SIZE - 1) / 2)] * 2), name="zero_padding_0"
+    )(x)
+    x = Conv1D(CONV_BLOCK_FILTERS[0], ENCODER_KERNEL_SIZE, name="conv_0")(x)
+    recurrent_module = get_recurrent_module(normalize=normalize)
+    num_recurrences = int(np.log2(num_spins / embedding_length))
+    for i in range(num_recurrences):
+        for layer in recurrent_module:
+            x = layer(x)
+
+    # Switched to conv instead of dense because dense tends to output a single value for all samples.
+    # Note that I removed regularization for the last layer.
+    x = Conv1D(filters=1, kernel_size=1, name="repeated_correlation")(x)
+    x = Lambda(tf.squeeze, arguments={"axis": 2}, name="squeeze_1")(x)
+    x = SliceRepetitions(final_size=DEFAULT_EMBEDDING_LENGTH, num_reps=num_reps)(x)
+    # TODO - Consider intermediate dense layer.
+    return Model(inputs=inputs, outputs=x, name=name)
+
+
+def get_correlation_model2(
+    num_spins,
+    num_reps=3,
+    embedding_length=DEFAULT_EMBEDDING_LENGTH,
+    name="model",
+    normalize=True,
+    training=True,
+):
     inputs = Input(shape=(num_spins * num_reps, 3), name="inputs")
     x = inputs
     x = ZeroPadding1D(
@@ -106,36 +168,27 @@ def get_correlation_model(
                 name="conv_" + str(i + 1),
             )
         )
-        if use_batchnorm:
+        if normalize:
             bn_layers.append(BatchNormalization(name="batchnorm_" + str(i + 1)))
-    num_conv_blocks = int(np.log2(num_spins / embedding_length))
-    for i in range(num_conv_blocks):
+    num_recurrences = int(np.log2(num_spins / embedding_length))
+    for i in range(num_recurrences):
         x = apply_conv_block(
             x,
             conv_layers,
             bn_layers,
             block_num=i + 1,
             training=training,
-            use_batchnorm=use_batchnorm,
+            use_batchnorm=normalize,
         )
         x = AveragePooling1D(
             pool_size=2, padding="valid", name="pooling_" + str(i + 1)
         )(x)
-    # x = Dense(units=1,
-    #           kernel_regularizer=l2(REG),
-    #           bias_regularizer=l2(REG),
-    #           name='repeated_correlation')(x)
     # Switched to conv instead of dense because dense tends to output a single value for all samples.
     # Note that I removed regularization for the last layer.
     x = Conv1D(filters=1, kernel_size=1, name="repeated_correlation")(x)
     x = Lambda(tf.squeeze, arguments={"axis": 2}, name="squeeze_1")(x)
     x = SliceRepetitions(final_size=DEFAULT_EMBEDDING_LENGTH, num_reps=num_reps)(x)
-    # x = Lambda(tf.squeeze, arguments={'axis': 1}, name='squeeze_2')(x)
     # TODO - Consider intermediate dense layer.
-    # x = Activation('sigmoid')(x)
-    # x = Dense(1, activation='sigmoid')(x)
-    # x = Lambda(lambda x: 2 * x - 1)(x)
-    # x = Lambda(tf.squeeze, arguments={'axis': 1})(x)
     return Model(inputs=inputs, outputs=x, name=name)
 
 
