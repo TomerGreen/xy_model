@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from numpy.core._multiarray_umath import ndarray
 import random
 
 
@@ -147,7 +146,7 @@ def calc_quadruple_term(i, j, eigvals, U):
 
 
 def get_z_correlation(i, j, P):
-    # # These two lines seem equivalent.
+    # # These two lines seem equival`ent.
     # c = 4 * (P[i, i] * P[j, j] - P[i, j] * P[j, i])
     # # c = 4 * calc_quadruple_term(i, j, eigvals, U)
     # c += 1 - 2 * (P[i, i] + P[j, j])
@@ -180,7 +179,6 @@ def plot_correlation(num_spins, phase_rates, dists, J_val=0.1):
         for dist_ind, dist in enumerate(dists):
             corr = get_z_correlation(0, dist, P)
             dist_corrs[dist_ind, config_ind] = corr
-    print(dist_corrs)
     for i, phase_rate in enumerate(phase_rates):
         # plt.plot(dists, np.log(-dist_corrs[:, i] + 1e-30), label="J/h = " + str(phase_rate))
         plt.plot(dists, dist_corrs[:, i], label="J/h = " + str(phase_rate))
@@ -211,22 +209,43 @@ def get_gaussian_kernel(length=11, sigma=1):
     ]
 
 
-def get_smooth_correlations(P, kernel):
+def get_smooth_correlations(P, kernel=None, envelope_only=False):
     num_spins = P.shape[0]
-    one_hot_mat = np.zeros(shape=(num_spins - 1, num_spins))
-    corrs = np.zeros(shape=num_spins)
+    # one_hot_mat = np.zeros(shape=(num_spins - 1, num_spins))
+    site_indices = np.zeros(shape=(num_spins - 1, 2))
+    corr = np.zeros(shape=num_spins - 1)
     for d in range(0, num_spins - 1):
-        one_hot_mat[d, 0] = 1
-        one_hot_mat[d, d + 1] = 1
-        corrs[d] = get_z_correlation(0, d, P)
-    # plt.plot(range(50, 206), corrs[50:206])
+        # one_hot_mat[d, 0] = 1
+        # one_hot_mat[d, d + 1] = 1
+        site_indices[d, 0] = 0
+        site_indices[d, 1] = d + 1
+        corr[d] = get_z_correlation(0, d + 1, P)
+    # plt.scatter(range(len(corr)), -corr + 1e-30, s=0.5)
+    # plt.suptitle("Spin Correlation by Distance")
+    # plt.ylabel("-corr(i, j)")
+    # plt.xlabel("r(i, j)")
     # plt.show()
-    corrs = np.tile(corrs, reps=3)
-    smoothed_corrs = np.convolve(corrs, kernel, mode="same")
-    smoothed_corrs = smoothed_corrs[num_spins - 1 : 2 * (num_spins - 1)]
-    # plt.plot(range(50, 206), smoothed_corrs[50:206])
+    if envelope_only:
+        mid = int(len(corr) / 2)
+        running_envelope = np.zeros(len(corr))
+        # Envelope of first half
+        running_envelope[:mid] = np.flip(np.minimum.accumulate(np.flip(corr[:mid])))
+        # Envelope of second half
+        running_envelope[mid:] = np.minimum.accumulate(corr[mid:])
+        good_indices = corr <= running_envelope
+        corr = corr[good_indices]
+        site_indices = site_indices[good_indices]
+    if kernel is not None:
+        corr = np.tile(corr, reps=3)
+        corr = np.convolve(corr, kernel, mode="same")
+        corr = corr[num_spins - 1 : 2 * (num_spins - 1)]
+    # plt.scatter(range(len(corr)), -corr + 1e-30, s=0.5)
+    # plt.suptitle("Smoothed Spin Correlation by Distance")
+    # plt.ylabel("-corr(i, j) * g(r)")
+    # plt.xlabel("r(i, j)")
+    # # plt.yscale("log")
     # plt.show()
-    return one_hot_mat, smoothed_corrs
+    return site_indices.astype(np.int), corr
 
 
 class RandomValueGenerator:
@@ -282,6 +301,9 @@ class CorrelationDataGenerator:
         custom_dist=False,
         gaussian_smoothing_sigma=0,
         toy_model=False,
+        two_index_channels=False,
+        total_channels=3,
+        envelope_only=False,
     ):
         """
         Defines the data being generated.
@@ -297,9 +319,10 @@ class CorrelationDataGenerator:
         :param custom_dist: Whether we are using a custom distribution for distances between
         examined sites.
         :param gaussian_smoothing_sigma: An odd int. The sigma value for gaussian smoothing. A
-        kernel with this sigma
-        will be convolved with the by-distance data if gaussian_smoothing_sigma > 0.
+        kernel with this sigma will be convolved with the by-distance data if gaussian_smoothing_sigma > 0.
         :param toy_model: Whether to generate data from the toy model (|J/h|)/r.
+        :param envelope_only: Correlation data will only contain the envelope of the oscillating
+        correlation relation.
         """
         self.repetitions = repetitions
         self.J_val_gen = J_val_gen
@@ -308,13 +331,11 @@ class CorrelationDataGenerator:
         self.custom_dist = custom_dist
         self.gaussian_smoothing_sigma = gaussian_smoothing_sigma
         self.toy_model = toy_model
+        self.two_index_channels = two_index_channels
+        self.total_channels = total_channels
+        self.envelope_only = envelope_only
 
-    def get_data(
-        self,
-        num_spins,
-        samples,
-        samples_per_config,
-    ):
+    def get_data(self, num_spins, samples, samples_per_config, return_y=True):
         """
         Generates correlation data for the spin_z correlation neural network. The data contains
         the coupling coefficients vector J, the field strength vector h and a one-hot vector for
@@ -329,7 +350,26 @@ class CorrelationDataGenerator:
             y - An array of shape (samples,) that specifies the correlation between the sites
             marked by the one-hot vector.
         """
-        x = np.zeros((samples, num_spins, 3))
+
+        def _get_sample(k, l, J_vec, h_vec):
+            if self.total_channels == 3 and self.two_index_channels:
+                assert ValueError("Not enough channels in input for two index channels")
+            sample = np.zeros(shape=(num_spins, self.total_channels))
+            J_channel = 1
+            if self.two_index_channels:
+                sample[:, 0:2] = 0
+                sample[k, 0] = 1
+                sample[l, 1] = 2
+                J_channel = 2
+            else:
+                sample[:, 0] = 0
+                sample[k, 0] = 1
+                sample[l, 0] = 1
+            sample[:, J_channel] = J_vec
+            sample[:, J_channel + 1] = h_vec
+            return sample
+
+        x = np.zeros((samples, num_spins, self.total_channels))
         y = np.zeros(samples)
         for i in range(int(samples / samples_per_config)):
             if self.disorder:
@@ -342,18 +382,24 @@ class CorrelationDataGenerator:
             eigvals, U = np.linalg.eigh(A)
             proj = (eigvals < 0) * np.eye(num_spins)
             P = np.dot(U, np.dot(proj, np.matrix(U).H))
-            if self.gaussian_smoothing_sigma > 0:
-                gaussian_kernel = get_gaussian_kernel(
-                    length=101, sigma=self.gaussian_smoothing_sigma
+            if self.gaussian_smoothing_sigma > 0 or self.envelope_only:
+                # If smoothing is envelope-only.
+                gaussian_kernel = None
+                if self.gaussian_smoothing_sigma > 0:
+                    gaussian_kernel = get_gaussian_kernel(
+                        length=101, sigma=self.gaussian_smoothing_sigma
+                    )
+                site_indices, corrs = get_smooth_correlations(
+                    P, kernel=gaussian_kernel, envelope_only=self.envelope_only
                 )
-                one_hot_mat, corrs = get_smooth_correlations(P, kernel=gaussian_kernel)
             for j in range(samples_per_config):
                 n = i * samples_per_config + j
-                x[n, :, 1] = J
-                x[n, :, 2] = h
-                if self.gaussian_smoothing_sigma > 0:
-                    rand_int = np.random.randint(low=0, high=num_spins - 1)
-                    x[n, :, 0] = one_hot_mat[rand_int, :]
+                # x[n, :, 1] = J
+                # x[n, :, 2] = h
+                if self.gaussian_smoothing_sigma > 0 or self.envelope_only:
+                    rand_int = np.random.randint(low=0, high=len(site_indices))
+                    k, l = site_indices[rand_int, 0], site_indices[rand_int, 1]
+                    x[n] = _get_sample(k, l, J_vec=J, h_vec=h)
                     y[n] = corrs[rand_int]
                 else:
                     # Do we need to make sure the indices are different?
@@ -364,8 +410,7 @@ class CorrelationDataGenerator:
                             l = (k + get_random_distance(num_spins)) % num_spins
                         else:
                             l = np.random.randint(num_spins)
-                    x[n, k, 0] = 1
-                    x[n, l, 0] = 1
+                    x[n] = _get_sample(k, l, J_vec=J, h_vec=h)
                     if self.toy_model:
                         distance = min((l - k) % num_spins, (k - l) % num_spins)
                         y[n] = -np.abs(J[0] / h[0]) / distance
@@ -377,7 +422,32 @@ class CorrelationDataGenerator:
         temp = list(zip(x, y))
         random.shuffle(temp)
         x, y = zip(*temp)
-        return np.array(x), np.array(y)
+        if return_y:
+            return np.array(x), np.array(y)
+        else:
+            return np.array(x)
+
+    def get_distances_from_x(self, x):
+        def get_distance(sample):
+            num_spins = len(sample)
+            if self.two_index_channels:
+                k = np.argwhere(sample[:, 0] != 0)[0, 0]
+                l = np.argwhere(sample[:, 1] != 0)[0, 0]
+            else:
+                nonzero_inds = np.argwhere(sample[:, 0] == 1.0)
+                k, l = nonzero_inds[0, 0], nonzero_inds[1, 0]
+            distance = min((l - k) % num_spins, (k - l) % num_spins)
+            return distance
+
+        num_spins = int(x.shape[1] / self.repetitions)
+        ind_start = num_spins * int(self.repetitions / 2)
+        spin_locs = x[:, ind_start : ind_start + num_spins, :]
+        # if self.two_index_channels:
+        #     spin_locs = x[:, ind_start : ind_start + num_spins, 0:2]
+        # else:
+        #     spin_locs = x[:, ind_start : ind_start + num_spins, 0]
+        distances = np.array([get_distance(sample) for sample in spin_locs])
+        return distances
 
 
 # def get_correlation_data(
@@ -495,13 +565,13 @@ class Scaler(object):
 
     def fit(self, y):
         if self.log:
-            y = np.log(-y + 1e-30)
+            y = np.log(-y + 1e-10)
         self.mean = y.mean()
         self.std = y.std()
 
     def transform(self, y):
         if self.log:
-            y = np.log(-y + 1e-30)
+            y = np.log(-y + 1e-10)
         if self.normalize:
             y = (y - self.mean) / self.std
         return y
@@ -511,23 +581,8 @@ class Scaler(object):
             y = y * self.std + self.mean
         if self.log:
             y = np.exp(y)
-            y = -(y - 1e-30)
+            y = -(y - 1e-10)
         return y
-
-
-def get_distances_from_x(x, num_reps=3):
-    def get_distance(x_vec):
-        num_spins = len(x_vec)
-        nonzero_inds = np.argwhere(x_vec == 1.0)
-        k, l = nonzero_inds[0, 0], nonzero_inds[1, 0]
-        distance = min((l - k) % num_spins, (k - l) % num_spins)
-        return distance
-
-    num_spins = int(x.shape[1] / num_reps)
-    ind_start = num_spins * int(num_reps / 2)
-    spin_locs = x[:, ind_start : ind_start + num_spins, 0]
-    distances = np.apply_along_axis(get_distance, axis=1, arr=spin_locs)
-    return distances
 
 
 def analyze_corr_by_distance(distances, y):
@@ -536,17 +591,38 @@ def analyze_corr_by_distance(distances, y):
     plt.show()
 
 
-if __name__ == "__main__":
-    J_rand_gen = RandomValueGenerator("normal", 2.0, 0.0)
-    h_rand_gen = RandomValueGenerator("normal", 1.0, 0.0)
+def find_phase_transition(num_spins, J_to_h_vals, log=False):
+    for val in J_to_h_vals:
+        J_rand_gen = RandomValueGenerator("normal", val, 0.0)
+        h_rand_gen = RandomValueGenerator("normal", 1.0, 0.0)
+        data_gen = CorrelationDataGenerator(
+            repetitions=3,
+            J_val_gen=J_rand_gen,
+            h_val_gen=h_rand_gen,
+            disorder=False,
+            gaussian_smoothing_sigma=0,
+            total_channels=3,
+        )
+        x, y = data_gen.get_data(
+            num_spins=num_spins, samples=1000, samples_per_config=1000
+        )
+        dist = data_gen.get_distances_from_x(x)
+        if log:
+            x_data = np.log(dist)
+            y_data = np.log(-y + 1e-7)
+        else:
+            x_data = dist
+            y_data = -y
+        plt.scatter(x_data, y_data, label=str(val), s=0.5)
+        plt.xlabel("r")
+        plt.ylabel("corr")
+    plt.legend(fontsize="xx-small")
+    plt.show()
 
-    data_gen = CorrelationDataGenerator(
-        num_spins=256,
-        J_val_gen=J_rand_gen,
-        h_val_gen=h_rand_gen,
-        disorder=False,
-        gaussian_smoothing_sigma=5,
-    )
-    x, y = data_gen.get_data(1000, 50)
-    distances = get_distances_from_x(x)
-    analyze_corr_by_distance(distances, y)
+
+if __name__ == "__main__":
+    start = 0.4999
+    end = 1.0 - start
+    step = (end - start) / 10
+    J_to_h_vals = np.arange(start, end, step=step)
+    find_phase_transition(num_spins=64, J_to_h_vals=J_to_h_vals, log=False)
