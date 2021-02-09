@@ -96,7 +96,9 @@ def compare_models(models, x, y, epochs):
         history = train(model, x, y, epochs=epochs)
         histories.append(history)
     for i, model in enumerate(models):
-        color = np.random.rand(3,)
+        color = np.random.rand(
+            3,
+        )
         plt.plot(range(epochs), histories[i].history["loss"], c=color, label=model.name)
         plt.plot(range(epochs), histories[i].history["val_loss"], ls="--", c=color)
     plt.legend()

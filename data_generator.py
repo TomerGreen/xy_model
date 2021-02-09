@@ -310,7 +310,10 @@ class CorrelationDataGenerator:
         self.toy_model = toy_model
 
     def get_data(
-        self, num_spins, samples, samples_per_config,
+        self,
+        num_spins,
+        samples,
+        samples_per_config,
     ):
         """
         Generates correlation data for the spin_z correlation neural network. The data contains
